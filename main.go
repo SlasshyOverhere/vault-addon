@@ -9,12 +9,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 )
 
-const defaultPort = "51546"
+const (
+	defaultPort    = "51546"
+	currentVersion = "0.1.0"
+)
 
 var port string
 
@@ -25,6 +30,7 @@ func main() {
 	}
 
 	showDisclaimer()
+	go checkForUpdates()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /manifest.json", handleManifest)
@@ -58,13 +64,44 @@ func main() {
 	server.Shutdown(ctx)
 }
 
+func configDir() string {
+	if runtime.GOOS == "windows" {
+		appData := os.Getenv("APPDATA")
+		if appData != "" {
+			return filepath.Join(appData, "vault-addon")
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".vault-addon")
+}
+
+func disclaimerAgreed() bool {
+	dir := configDir()
+	data, err := os.ReadFile(filepath.Join(dir, "agreed"))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "1"
+}
+
+func saveDisclaimerAgreement() {
+	dir := configDir()
+	os.MkdirAll(dir, 0755)
+	os.WriteFile(filepath.Join(dir, "agreed"), []byte("1"), 0644)
+}
+
 func showDisclaimer() {
 	for _, arg := range os.Args[1:] {
 		if arg == "--yes" || arg == "--agree" {
+			saveDisclaimerAgreement()
 			return
 		}
 	}
 	if os.Getenv("AGREE") == "1" {
+		saveDisclaimerAgreement()
+		return
+	}
+	if disclaimerAgreed() {
 		return
 	}
 
@@ -92,6 +129,7 @@ func showDisclaimer() {
 		fmt.Println("Exiting.")
 		os.Exit(0)
 	}
+	saveDisclaimerAgreement()
 }
 
 // --- Stremio manifest ---
