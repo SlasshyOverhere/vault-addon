@@ -58,10 +58,7 @@ func checkForUpdates() {
 	}
 
 	// Find the right asset for this platform
-	assetName := fmt.Sprintf("vault-addon-%s-%s", runtime.GOOS, runtime.GOARCH)
-	if runtime.GOOS == "windows" {
-		assetName += ".exe"
-	}
+	assetName := fmt.Sprintf("vault-addon-%s-%s%s", runtime.GOOS, runtime.GOARCH, exeSuffix())
 
 	var downloadURL string
 	for _, a := range release.Assets {
@@ -133,6 +130,13 @@ func downloadFile(client *http.Client, url string) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 func sha256Hex(data []byte) string {
