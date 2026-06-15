@@ -1,0 +1,30 @@
+# Binaries
+*.exe
+*.bin
+*.dll
+*.so
+*.dylib
+
+# Node.js (legacy)
+node_modules/
+package.json
+package-lock.json
+index.js
+parallel-download.mjs
+
+# IDE / tools
+.playwright-mcp/
+.vibedoctor/
+.opencode/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.log
+test_*.mjs
+dist/
