@@ -291,8 +291,17 @@ h1{color:#0cf}h2{color:#fa0;border-bottom:1px solid #333;padding-bottom:.3rem}co
 table{border-collapse:collapse;width:100%%}th,td{border:1px solid #333;padding:.4rem .6rem;text-align:left}th{background:#1a1a1a}
 .endpoint{background:#1a2a1a;border-left:3px solid #0f0;padding:.5rem 1rem;margin:.5rem 0}</style></head><body>
 <h1>vault-addon</h1>
-<p>Stream proxy addon — scrapes movie &amp; series sources and provides direct CDN download links.</p>
-<p><a href="https://github.com/SlasshyOverhere/vault-addon" style="color:#0cf">GitHub</a></p>
+<p>Open-source link aggregator for movie &amp; series streams. Scrapes publicly available pages and provides direct CDN download links.</p>
+<p><a href="https://github.com/SlasshyOverhere/vault-addon" style="color:#0cf">GitHub</a> &middot; <a href="https://github.com/SlasshyOverhere/vault-addon/blob/main/LICENSE" style="color:#0cf">MIT License</a> &middot; v0.1.0</p>
+
+<h2>About</h2>
+<p>vault-addon is a lightweight, single-binary HTTP server that aggregates publicly available stream links from public websites. Written in Go for fast startup and minimal resource usage. No external dependencies required at runtime.</p>
+<ul>
+<li>No media hosting — links point to third-party servers</li>
+<li>No API keys or accounts required</li>
+<li>Supports movies, series episodes, and full season packs</li>
+<li>Resolves redirect chains to direct CDN download URLs</li>
+</ul>
 
 <h2>Endpoints</h2>
 
