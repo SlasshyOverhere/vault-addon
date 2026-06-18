@@ -284,6 +284,104 @@ func resolveRedButtonFromHub(ctx context.Context, hubURL string) (string, error)
 	return redMatch[1], nil
 }
 
+// --- Blue button resolution (r2.dev / workers.dev — no pixeldrain) ---
+
+type blueLink struct {
+	url   string
+	label string
+}
+
+// resolveBlueButtons fetches the hub page, finds the gamerxyt page,
+// and extracts blue button links (r2.dev, workers.dev).
+// Pixeldrain is excluded.
+func resolveBlueButtons(ctx context.Context, hubURL string) ([]blueLink, error) {
+	pageHTML, err := fetchPageHTML(ctx, hubURL)
+	if err != nil || pageHTML == "" {
+		return nil, err
+	}
+
+	gxytMatch := gamerxytRe.FindString(pageHTML)
+	if gxytMatch == "" {
+		return nil, nil
+	}
+
+	gxytHTML, err := fetchPageHTML(ctx, gxytMatch)
+	if err != nil || gxytHTML == "" {
+		return nil, nil
+	}
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(gxytHTML))
+	if err != nil {
+		return nil, err
+	}
+
+	var links []blueLink
+
+	// Blue button (FSL) — r2.dev links
+	doc.Find(`a.btn-success[href*="r2.dev"], a#fsl[href*="r2.dev"]`).Each(func(_ int, el *goquery.Selection) {
+		if href, ok := el.Attr("href"); ok {
+			links = append(links, blueLink{url: href, label: "FSL"})
+		}
+	})
+
+	// Worker links (ddl2/ddl3 workers.dev)
+	doc.Find(`a.btn-success[href*="workers.dev"], a.btn-success[href*="ddl"]`).Each(func(_ int, el *goquery.Selection) {
+		if href, ok := el.Attr("href"); ok {
+			links = append(links, blueLink{url: href, label: "Worker"})
+		}
+	})
+
+	// Fallback: any btn-success that's not red button and not pixeldrain
+	if len(links) == 0 {
+		doc.Find(`a.btn-success, a.btn-success1`).Each(func(_ int, el *goquery.Selection) {
+			href, _ := el.Attr("href")
+			if href != "" &&
+				!strings.Contains(href, "pixel.hubcloud.cx") &&
+				!strings.Contains(href, "gamerxyt.com") &&
+				!strings.Contains(href, "pixeldrain") {
+				links = append(links, blueLink{url: href, label: "Direct"})
+			}
+		})
+	}
+
+	return links, nil
+}
+
+// validateBlueLink does a HEAD request to check if a blue button URL
+// is reachable and appears to serve video content.
+func validateBlueLink(ctx context.Context, url string) bool {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", browserUA)
+	req.Header.Set("Referer", "https://gamerxyt.com/")
+
+	resp, err := noRedirectClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return false
+	}
+
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(ct, "video") ||
+		strings.Contains(ct, "octet-stream") ||
+		strings.Contains(ct, "zip") {
+		return true
+	}
+
+	// Some CDNs don't set proper content-type on HEAD, accept redirects too
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return true
+	}
+
+	return false
+}
+
 // --- Pack link resolution ---
 
 type packLink struct {

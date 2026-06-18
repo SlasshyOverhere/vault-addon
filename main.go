@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultPort    = "51546"
-	currentVersion = "0.1.0"
+	currentVersion = "0.1.1"
 )
 
 var port string
@@ -30,12 +30,19 @@ func main() {
 	}
 
 	showDisclaimer()
+	if err := initSiteRegistry(); err != nil {
+		log.Fatalf("Failed to load site registry: %v", err)
+	}
 	go checkForUpdates()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /manifest.json", handleManifest)
 	mux.HandleFunc("GET /stream/{type}/{rest...}", handleStream)
 	mux.HandleFunc("GET /extract/", handleExtract)
+	mux.HandleFunc("GET /admin", handleAdmin)
+	mux.HandleFunc("GET /api/sites", handleAPIListSites)
+	mux.HandleFunc("POST /api/sites", handleAPIAddSite)
+	mux.HandleFunc("POST /api/sites/remove", handleAPIRemoveSite)
 	mux.HandleFunc("GET /{$}", handleDocs)
 	mux.HandleFunc("GET /", handleDocs)
 
@@ -147,7 +154,7 @@ type Manifest struct {
 
 var manifest = Manifest{
 	ID:          "org.vault-addon",
-	Version:     "0.1.0",
+	Version:     "0.2.0",
 	Name:        "vault-addon",
 	Description: "HTTP streams with CDN redirect. No debrid needed.",
 	Resources:   []string{"stream"},
@@ -259,7 +266,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	} else if isSeries {
 		sp := fmt.Sprintf("%02d", season)
 		ep := fmt.Sprintf("%02d", episode)
-		streams = extractStreams(html, func(epNum string) bool {
+		streams = extractStreams(ctx, html, func(epNum string) bool {
 			return strings.Contains(epNum, "S"+sp)
 		}, meta.Name, baseURL)
 		// Filter to specific episode
@@ -275,7 +282,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		streams = filtered
 	} else {
-		streams = extractMovieStreams(html, meta.Name, baseURL)
+		streams = extractMovieStreams(ctx, html, meta.Name, baseURL)
 	}
 
 	if streams == nil {
@@ -330,7 +337,7 @@ table{border-collapse:collapse;width:100%%}th,td{border:1px solid #333;padding:.
 .endpoint{background:#1a2a1a;border-left:3px solid #0f0;padding:.5rem 1rem;margin:.5rem 0}</style></head><body>
 <h1>vault-addon</h1>
 <p>Open-source link aggregator for movie &amp; series streams. Scrapes publicly available pages and provides direct CDN download links.</p>
-<p><a href="https://github.com/SlasshyOverhere/vault-addon" style="color:#0cf">GitHub</a> &middot; <a href="https://github.com/SlasshyOverhere/vault-addon/blob/main/LICENSE" style="color:#0cf">MIT License</a> &middot; v0.1.0</p>
+<p><a href="https://github.com/SlasshyOverhere/vault-addon" style="color:#0cf">GitHub</a> &middot; <a href="https://github.com/SlasshyOverhere/vault-addon/blob/main/LICENSE" style="color:#0cf">MIT License</a> &middot; <a href="/admin" style="color:#0cf">Admin Panel</a> &middot; v0.1.1</p>
 
 <h2>About</h2>
 <p>vault-addon is a lightweight, single-binary HTTP server that aggregates publicly available stream links from public websites. Written in Go for fast startup and minimal resource usage. No external dependencies required at runtime.</p>
