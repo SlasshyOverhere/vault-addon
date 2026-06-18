@@ -9,20 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
 // --- Domain discovery ---
-
-var domains = []string{
-	"https://4khdhub.one",
-	"https://4khdhub.link",
-	"https://4khdhub.click",
-	"https://4khdhub.ink",
-	"https://4khdhub.to",
-	"https://4khdhub.cc",
-}
 
 var (
 	activeDomain   string
@@ -36,6 +28,11 @@ func findActiveDomain(ctx context.Context) string {
 		return activeDomain
 	}
 	activeDomainMu.RUnlock()
+
+	domains := getSiteDomains()
+	if len(domains) == 0 {
+		return ""
+	}
 
 	for _, d := range domains {
 		reqURL := d + "/?s=test"
@@ -56,6 +53,14 @@ func findActiveDomain(ctx context.Context) string {
 	activeDomain = domains[0]
 	activeDomainMu.Unlock()
 	return domains[0]
+}
+
+// invalidateActiveDomain clears the cached active domain so the next
+// request re-discovers. Called when sites are added/removed.
+func invalidateActiveDomain() {
+	activeDomainMu.Lock()
+	activeDomain = ""
+	activeDomainMu.Unlock()
 }
 
 // --- Meta fetching ---
@@ -269,7 +274,37 @@ func buildStreamTitle(fileTitle, sizeStr, url string) string {
 	return fileTitle + "\n" + "\U0001F4BF " + sizeDisplay + " | " + host
 }
 
-func extractStreams(html string, episodeFilter func(string) bool, displayName, baseURL string) []Stream {
+// resolveAndValidateBlue fetches blue button links from a hub URL,
+// validates each with a HEAD request, and returns only the active ones.
+func resolveAndValidateBlue(ctx context.Context, hubURL string) []blueLink {
+	blueCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	links, err := resolveBlueButtons(blueCtx, hubURL)
+	if err != nil || len(links) == 0 {
+		return nil
+	}
+
+	var valid []blueLink
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, l := range links {
+		wg.Add(1)
+		go func(bl blueLink) {
+			defer wg.Done()
+			if validateBlueLink(blueCtx, bl.url) {
+				mu.Lock()
+				valid = append(valid, bl)
+				mu.Unlock()
+			}
+		}(l)
+	}
+	wg.Wait()
+	return valid
+}
+
+func extractStreams(ctx context.Context, html string, episodeFilter func(string) bool, displayName, baseURL string) []Stream {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return nil
@@ -319,6 +354,7 @@ func extractStreams(html string, episodeFilter func(string) bool, displayName, b
 			}
 
 			for _, u := range hubURLs {
+				// Red button — always shown via /extract/
 				results = append(results, Stream{
 					URL:   streamURL(u, baseURL),
 					Name:  streamName,
@@ -328,6 +364,20 @@ func extractStreams(html string, episodeFilter func(string) bool, displayName, b
 						"videoSize":   sizeBytes,
 					},
 				})
+
+				// Blue button — validated, shown directly if active
+				blueLinks := resolveAndValidateBlue(ctx, u)
+				for _, bl := range blueLinks {
+					results = append(results, Stream{
+						URL:   bl.url,
+						Name:  streamName + " [" + bl.label + "]",
+						Title: fileTitle + "\n🔵 " + bl.label + " | Direct",
+						BehaviorHints: map[string]any{
+							"notWebReady": true,
+							"videoSize":   sizeBytes,
+						},
+					})
+				}
 			}
 		})
 	})
@@ -335,7 +385,7 @@ func extractStreams(html string, episodeFilter func(string) bool, displayName, b
 	return results
 }
 
-func extractMovieStreams(html, displayName, baseURL string) []Stream {
+func extractMovieStreams(ctx context.Context, html, displayName, baseURL string) []Stream {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return nil
@@ -367,6 +417,7 @@ func extractMovieStreams(html, displayName, baseURL string) []Stream {
 		}
 
 		for _, u := range hubURLs {
+			// Red button — always shown via /extract/
 			results = append(results, Stream{
 				URL:   streamURL(u, baseURL),
 				Name:  name,
@@ -376,6 +427,20 @@ func extractMovieStreams(html, displayName, baseURL string) []Stream {
 					"videoSize":   sizeBytes,
 				},
 			})
+
+			// Blue button — validated, shown directly if active
+			blueLinks := resolveAndValidateBlue(ctx, u)
+			for _, bl := range blueLinks {
+				results = append(results, Stream{
+					URL:   bl.url,
+					Name:  name + " [" + bl.label + "]",
+					Title: fileTitle + "\n🔵 " + bl.label + " | Direct",
+					BehaviorHints: map[string]any{
+						"notWebReady": true,
+						"videoSize":   sizeBytes,
+					},
+				})
+			}
 		}
 	})
 
