@@ -24,15 +24,36 @@ const (
 var port string
 
 func main() {
-	port = os.Getenv("PORT")
+	// Parse --port flag from command line
+	for i, arg := range os.Args[1:] {
+		if arg == "--port" && i+1 < len(os.Args)-1 {
+			port = os.Args[i+2]
+			break
+		}
+	}
+	// Fall back to environment variable
+	if port == "" {
+		port = os.Getenv("PORT")
+	}
 	if port == "" {
 		port = defaultPort
+	}
+
+	// Handle --version flag
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-v" {
+			fmt.Printf("vault-addon %s\n", currentVersion)
+			os.Exit(0)
+		}
 	}
 
 	showDisclaimer()
 	if err := initSiteRegistry(); err != nil {
 		log.Fatalf("Failed to load site registry: %v", err)
 	}
+	cache.loadFromDisk()
+	stopPruner := startCachePruner()
+	defer stopPruner()
 	go checkForUpdates()
 
 	mux := http.NewServeMux()
@@ -43,6 +64,13 @@ func main() {
 	mux.HandleFunc("GET /api/sites", handleAPIListSites)
 	mux.HandleFunc("POST /api/sites", handleAPIAddSite)
 	mux.HandleFunc("POST /api/sites/remove", handleAPIRemoveSite)
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"version": currentVersion,
+			"port":    port,
+		})
+	})
 	mux.HandleFunc("GET /{$}", handleDocs)
 	mux.HandleFunc("GET /", handleDocs)
 
@@ -182,6 +210,11 @@ type StreamResponse struct {
 }
 
 func handleStream(w http.ResponseWriter, r *http.Request) {
+	// Check cache first
+	if handleCachedStream(w, r) {
+		return
+	}
+
 	itype := r.PathValue("type")
 	rawID := r.PathValue("rest")
 
@@ -266,21 +299,27 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	} else if isSeries {
 		sp := fmt.Sprintf("%02d", season)
 		ep := fmt.Sprintf("%02d", episode)
+		// Try precise season+episode filter first (avoids resolving all episodes)
 		streams = extractStreams(ctx, html, func(epNum string) bool {
-			return strings.Contains(epNum, "S"+sp)
+			return strings.Contains(epNum, "S"+sp) && (strings.Contains(epNum, "E"+ep) || strings.Contains(epNum, "Episode-"+ep) || strings.Contains(epNum, "Ep"+ep))
 		}, meta.Name, baseURL)
-		// Filter to specific episode
-		filtered := make([]Stream, 0, len(streams))
-		for _, s := range streams {
-			titleFirstLine := s.Title
-			if idx := strings.Index(titleFirstLine, "\n"); idx >= 0 {
-				titleFirstLine = titleFirstLine[:idx]
+		// Fallback: season-only filter + post-filter (for sites without episode numbers in HTML)
+		if len(streams) == 0 {
+			streams = extractStreams(ctx, html, func(epNum string) bool {
+				return strings.Contains(epNum, "S"+sp)
+			}, meta.Name, baseURL)
+			filtered := make([]Stream, 0, len(streams))
+			for _, s := range streams {
+				titleFirstLine := s.Title
+				if idx := strings.Index(titleFirstLine, "\n"); idx >= 0 {
+					titleFirstLine = titleFirstLine[:idx]
+				}
+				if strings.Contains(titleFirstLine, "Episode-"+ep) || strings.Contains(titleFirstLine, "S"+sp+"E"+ep) {
+					filtered = append(filtered, s)
+				}
 			}
-			if strings.Contains(titleFirstLine, "Episode-"+ep) || strings.Contains(titleFirstLine, "S"+sp+"E"+ep) {
-				filtered = append(filtered, s)
-			}
+			streams = filtered
 		}
-		streams = filtered
 	} else {
 		streams = extractMovieStreams(ctx, html, meta.Name, baseURL)
 	}
@@ -288,7 +327,13 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	if streams == nil {
 		streams = []Stream{}
 	}
-	writeJSON(w, StreamResponse{Streams: streams})
+	resp := StreamResponse{Streams: streams}
+
+	// Store in cache
+	cacheKey := cacheKeyForRequest(r.URL.Path, r.URL.RawQuery)
+	cacheStoreResponse(cacheKey, resp)
+
+	writeJSON(w, resp)
 }
 
 // --- Extract handler ---
@@ -298,6 +343,17 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 	if hubURL == "" {
 		http.Error(w, `{"error":"missing url"}`, http.StatusBadRequest)
 		return
+	}
+
+	// Check cache — store the redirect URL to skip the full resolution chain
+	cacheKey := cacheKeyForRequest(r.URL.Path, r.URL.RawQuery)
+	if cached, ok := cache.Get(cacheKey); ok {
+		var redirectURL string
+		if json.Unmarshal(cached, &redirectURL) == nil && redirectURL != "" {
+			log.Printf("[/extract] cache hit -> redirect")
+			http.Redirect(w, r, redirectURL, http.StatusFound)
+			return
+		}
 	}
 
 	log.Printf("[/extract] %.80s...", hubURL)
@@ -319,6 +375,12 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("  -> redirecting to google CDN")
+
+	// Cache the redirect URL
+	if data, err := json.Marshal(googleURL); err == nil {
+		cache.Set(cacheKey, data)
+	}
+
 	http.Redirect(w, r, googleURL, http.StatusFound)
 }
 

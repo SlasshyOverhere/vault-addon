@@ -310,6 +310,14 @@ func extractStreams(ctx context.Context, html string, episodeFilter func(string)
 		return nil
 	}
 
+	// Phase 1: Collect all hub URLs and their metadata (fast, no HTTP)
+	type hubEntry struct {
+		hubURL     string
+		streamName string
+		fileTitle  string
+		sizeBytes  float64
+	}
+	var entries []hubEntry
 	var results []Stream
 	seen := make(map[string]bool)
 
@@ -354,7 +362,7 @@ func extractStreams(ctx context.Context, html string, episodeFilter func(string)
 			}
 
 			for _, u := range hubURLs {
-				// Red button — always shown via /extract/
+				// Red button — always shown via /extract/ (no HTTP needed)
 				results = append(results, Stream{
 					URL:   streamURL(u, baseURL),
 					Name:  streamName,
@@ -365,22 +373,45 @@ func extractStreams(ctx context.Context, html string, episodeFilter func(string)
 					},
 				})
 
-				// Blue button — validated, shown directly if active
-				blueLinks := resolveAndValidateBlue(ctx, u)
-				for _, bl := range blueLinks {
-					results = append(results, Stream{
-						URL:   bl.url,
-						Name:  streamName + " [" + bl.label + "]",
-						Title: fileTitle + "\n🔵 " + bl.label + " | Direct",
-						BehaviorHints: map[string]any{
-							"notWebReady": true,
-							"videoSize":   sizeBytes,
-						},
-					})
-				}
+				// Collect for concurrent blue-button resolution
+				entries = append(entries, hubEntry{
+					hubURL:     u,
+					streamName: streamName,
+					fileTitle:  fileTitle,
+					sizeBytes:  sizeBytes,
+				})
 			}
 		})
 	})
+
+	// Phase 2: Resolve blue buttons concurrently (all hub URLs in parallel)
+	if len(entries) > 0 {
+		type resolvedBlue struct {
+			entry     hubEntry
+			blueLinks []blueLink
+		}
+		ch := make(chan resolvedBlue, len(entries))
+		for _, e := range entries {
+			go func(ent hubEntry) {
+				links := resolveAndValidateBlue(ctx, ent.hubURL)
+				ch <- resolvedBlue{entry: ent, blueLinks: links}
+			}(e)
+		}
+		for i := 0; i < len(entries); i++ {
+			r := <-ch
+			for _, bl := range r.blueLinks {
+				results = append(results, Stream{
+					URL:   bl.url,
+					Name:  r.entry.streamName + " [" + bl.label + "]",
+					Title: r.entry.fileTitle + "\n🔵 " + bl.label + " | Direct",
+					BehaviorHints: map[string]any{
+						"notWebReady": true,
+						"videoSize":   r.entry.sizeBytes,
+					},
+				})
+			}
+		}
+	}
 
 	return results
 }
