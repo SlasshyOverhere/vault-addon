@@ -56,6 +56,7 @@ func handleAPIAddSite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]any{"ok": true, "site": site})
+	invalidateCacheForSite()
 }
 
 func handleAPIRemoveSite(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +78,7 @@ func handleAPIRemoveSite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]any{"ok": true})
+	invalidateCacheForSite()
 }
 
 // --- Validation ---
