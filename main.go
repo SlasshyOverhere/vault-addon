@@ -265,22 +265,22 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get meta
-	meta, err := getMeta(ctx, imdbOrTmdb, itype)
+	meta, err := getMetaCached(ctx, imdbOrTmdb, itype)
 	if err != nil || meta == nil || meta.Name == "" {
 		writeJSON(w, StreamResponse{Streams: []Stream{}})
 		return
 	}
 
 	// Find page
-	pageURL, err := findPageURL(ctx, meta.Name, meta.Year, isSeries)
+	pageURL, err := findPageURLCached(ctx, meta.Name, meta.Year, isSeries)
 	if err != nil || pageURL == "" {
 		writeJSON(w, StreamResponse{Streams: []Stream{}})
 		return
 	}
 
 	// Fetch page
-	html, err := fetchPageHTML(ctx, pageURL)
-	if err != nil || html == "" {
+	html := fetchPageHTMLCached(ctx, pageURL)
+	if html == "" {
 		writeJSON(w, StreamResponse{Streams: []Stream{}})
 		return
 	}

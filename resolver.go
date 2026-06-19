@@ -114,7 +114,7 @@ func cdnCacheSet(key, redURL string) {
 	defer cdnCacheMu.Unlock()
 	cdnCache[key] = &cdnCacheEntry{
 		redURL:  redURL,
-		expires: time.Now().Add(30 * time.Second),
+		expires: time.Now().Add(5 * time.Minute),
 	}
 }
 
