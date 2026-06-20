@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,22 +23,32 @@ const (
 )
 
 var port string
+var cacheDir string
 
 func main() {
-	// Parse --port flag from command line
+	// Parse flags
 	for i, arg := range os.Args[1:] {
 		if arg == "--port" && i+1 < len(os.Args)-1 {
 			port = os.Args[i+2]
-			break
+		}
+		if arg == "--cache-dir" && i+1 < len(os.Args)-1 {
+			cacheDir = os.Args[i+2]
 		}
 	}
-	// Fall back to environment variable
 	if port == "" {
 		port = os.Getenv("PORT")
 	}
 	if port == "" {
 		port = defaultPort
 	}
+	if cacheDir == "" {
+		cacheDir = os.Getenv("CACHE_DIR")
+	}
+	if cacheDir == "" {
+		cacheDir = filepath.Join(os.TempDir(), "vault-addon-cache")
+	}
+	os.MkdirAll(cacheDir, 0755)
+	log.Printf("[config] cache dir: %s", cacheDir)
 
 	// Handle --version flag
 	for _, arg := range os.Args[1:] {
@@ -60,6 +71,7 @@ func main() {
 	mux.HandleFunc("GET /manifest.json", handleManifest)
 	mux.HandleFunc("GET /stream/{type}/{rest...}", handleStream)
 	mux.HandleFunc("GET /extract/", handleExtract)
+	mux.HandleFunc("GET /proxy/", handleProxy)
 	mux.HandleFunc("GET /admin", handleAdmin)
 	mux.HandleFunc("GET /api/sites", handleAPIListSites)
 	mux.HandleFunc("POST /api/sites", handleAPIAddSite)
@@ -78,7 +90,7 @@ func main() {
 		Addr:         ":" + port,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: 0, // streaming video needs no write timeout
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -334,6 +346,21 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	cacheStoreResponse(cacheKey, resp)
 
 	writeJSON(w, resp)
+
+	// Pre-warm the first extract URL's CDN redirect so subsequent
+	// /extract/ calls resolve near-instantly.
+	for _, s := range streams {
+		if strings.Contains(s.URL, "/extract/") {
+			// Parse hub URL from the extract query param
+			if u, err := url.Parse(s.URL); err == nil {
+				hubURL := u.Query().Get("url")
+				if hubURL != "" {
+					go prewarmExtract(context.Background(), hubURL)
+				}
+			}
+			break // only pre-warm the first one
+		}
+	}
 }
 
 // --- Extract handler ---
@@ -345,13 +372,13 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check cache — store the redirect URL to skip the full resolution chain
+	// Check cache — always redirect to CDN (no proxy, no skip-through delay)
 	cacheKey := cacheKeyForRequest(r.URL.Path, r.URL.RawQuery)
 	if cached, ok := cache.Get(cacheKey); ok {
-		var redirectURL string
-		if json.Unmarshal(cached, &redirectURL) == nil && redirectURL != "" {
-			log.Printf("[/extract] cache hit -> redirect")
-			http.Redirect(w, r, redirectURL, http.StatusFound)
+		var cdnURL string
+		if json.Unmarshal(cached, &cdnURL) == nil && cdnURL != "" {
+			log.Printf("[/extract] cache hit -> redirect to CDN")
+			http.Redirect(w, r, cdnURL, http.StatusFound)
 			return
 		}
 	}
@@ -374,13 +401,15 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("  -> redirecting to google CDN")
+	log.Printf("  -> resolving CDN URL")
 
-	// Cache the redirect URL
+	// Cache the CDN URL so subsequent requests are instant
 	if data, err := json.Marshal(googleURL); err == nil {
 		cache.Set(cacheKey, data)
 	}
 
+	// Always redirect to CDN — no proxy, no skip-through delay
+	log.Printf("  -> redirect to CDN")
 	http.Redirect(w, r, googleURL, http.StatusFound)
 }
 
