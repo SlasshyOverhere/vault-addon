@@ -247,7 +247,7 @@ func followDLChain(ctx context.Context, dlURL string) (string, error) {
 // --- Resolve hubcloud red button from hub page ---
 
 var gamerxytRe = regexp.MustCompile(`https://gamerxyt\.com/hubcloud\.php[^'"]+`)
-var redBtnRe = regexp.MustCompile(`href="(https://pixel\.hubcloud\.cx/\?id=[^"']+)`)
+var redBtnRe = regexp.MustCompile(`href="(https://(?:pixel|gpdl)\.hubcloud\.cx/\?id=[^"']+)`)
 
 func resolveRedButtonFromHub(ctx context.Context, hubURL string) (string, error) {
 	if cached, ok := cdnCacheGet(hubURL); ok {
@@ -328,6 +328,13 @@ func resolveBlueButtons(ctx context.Context, hubURL string) ([]blueLink, error) 
 	doc.Find(`a.btn-success[href*="workers.dev"], a.btn-success[href*="ddl"]`).Each(func(_ int, el *goquery.Selection) {
 		if href, ok := el.Attr("href"); ok {
 			links = append(links, blueLink{url: href, label: "Worker"})
+		}
+	})
+
+	// gpdl.hubcloud.cx links (btn-danger on newer hubcloud pages)
+	doc.Find(`a.btn-danger[href*="gpdl.hubcloud.cx"]`).Each(func(_ int, el *goquery.Selection) {
+		if href, ok := el.Attr("href"); ok {
+			links = append(links, blueLink{url: href, label: "GPDL"})
 		}
 	})
 

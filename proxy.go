@@ -1,3 +1,15 @@
+// proxy.go — Streaming HTTP proxy with 206 Partial Content support.
+//
+// NOTE: This proxy is currently UNUSED for Google CDN URLs because
+// Google CDN (video-downloads.googleusercontent.com) ignores Range
+// headers and always returns 200 with the full file. Proxying adds
+// skip-through delay with no benefit — /extract/ redirects directly
+// to Google CDN instead.
+//
+// The proxy is kept for future use if a CDN that supports Range
+// requests is discovered (e.g., workers.dev/r2.dev links already
+// support native 206 and don't need proxying either).
+
 package main
 
 import (

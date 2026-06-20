@@ -28,3 +28,7 @@ Thumbs.db
 *.log
 test_*.mjs
 dist/
+.omc/
+.serena/
+testrunner/
+vault-addon.exe~
