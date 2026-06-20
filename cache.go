@@ -26,10 +26,20 @@ type responseCache struct {
 	mu      sync.RWMutex
 	entries map[string]cacheEntry
 	dirty   bool
+	saveTimer *time.Timer
 }
 
 var cache = &responseCache{
 	entries: make(map[string]cacheEntry),
+}
+
+// scheduleSaveLocked starts a 200ms debounce timer to coalesce
+// rapid Set calls into a single disk write. Must be called with c.mu held.
+func (c *responseCache) scheduleSaveLocked() {
+	if c.saveTimer != nil {
+		c.saveTimer.Stop()
+	}
+	c.saveTimer = time.AfterFunc(200*time.Millisecond, c.saveToDisk)
 }
 
 func (c *responseCache) Get(key string) (json.RawMessage, bool) {
@@ -58,8 +68,8 @@ func (c *responseCache) Set(key string, data json.RawMessage) {
 		CachedAt: time.Now(),
 	}
 	c.dirty = true
+	c.scheduleSaveLocked()
 	c.mu.Unlock()
-	go c.saveToDisk()
 }
 
 func (c *responseCache) prune() {
@@ -145,8 +155,8 @@ func (c *responseCache) Clear() {
 	c.mu.Lock()
 	c.entries = make(map[string]cacheEntry)
 	c.dirty = true
+	c.scheduleSaveLocked()
 	c.mu.Unlock()
-	go c.saveToDisk()
 	log.Println("[cache] cleared")
 }
 

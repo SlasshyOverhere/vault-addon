@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"math"
 	"regexp"
 	"strconv"
@@ -34,25 +35,49 @@ func findActiveDomain(ctx context.Context) string {
 		return ""
 	}
 
+	// Parallel health check across all domains
+	type result struct {
+		domain string
+		ok     bool
+	}
+	ch := make(chan result, len(domains))
+	var wg sync.WaitGroup
 	for _, d := range domains {
-		reqURL := d + "/?s=test"
-		resp, err := httpGet(ctx, reqURL, nil)
-		if err != nil {
-			continue
-		}
-		resp.Body.Close()
-		if resp.StatusCode < 400 {
-			activeDomainMu.Lock()
-			activeDomain = d
-			activeDomainMu.Unlock()
-			return d
+		wg.Add(1)
+		go func(domain string) {
+			defer wg.Done()
+			dCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			reqURL := domain + "/?s=test"
+			resp, err := httpGet(dCtx, reqURL, nil)
+			if err != nil {
+				ch <- result{domain, false}
+				return
+			}
+			resp.Body.Close()
+			ch <- result{domain, resp.StatusCode < 400}
+		}(d)
+	}
+	wg.Wait()
+	close(ch)
+
+	firstAlive := ""
+	for r := range ch {
+		if r.ok && firstAlive == "" {
+			firstAlive = r.domain
 		}
 	}
 
-	activeDomainMu.Lock()
-	activeDomain = domains[0]
-	activeDomainMu.Unlock()
-	return domains[0]
+	if firstAlive == "" && len(domains) > 0 {
+		firstAlive = domains[0]
+	}
+
+	if firstAlive != "" {
+		activeDomainMu.Lock()
+		activeDomain = firstAlive
+		activeDomainMu.Unlock()
+	}
+	return firstAlive
 }
 
 // invalidateActiveDomain clears the cached active domain so the next
@@ -66,11 +91,38 @@ func invalidateActiveDomain() {
 // --- Meta fetching ---
 
 type Meta struct {
-	Name  string
-	Year  int
+	Name string
+	Year int
 }
 
 var cinemetaClient = newHTTPClient(8)
+
+// cinemetaCache caches Cinemeta responses (names don't change)
+var (
+	cinemetaCache   = make(map[string]*Meta)
+	cinemetaCacheMu sync.RWMutex
+)
+
+func getMetaCached(ctx context.Context, id, itype string) (*Meta, error) {
+	cacheKey := itype + ":" + id
+	cinemetaCacheMu.RLock()
+	if m, ok := cinemetaCache[cacheKey]; ok {
+		cinemetaCacheMu.RUnlock()
+		return m, nil
+	}
+	cinemetaCacheMu.RUnlock()
+
+	meta, err := getMeta(ctx, id, itype)
+	if err != nil {
+		return nil, err
+	}
+	if meta != nil && meta.Name != "" {
+		cinemetaCacheMu.Lock()
+		cinemetaCache[cacheKey] = meta
+		cinemetaCacheMu.Unlock()
+	}
+	return meta, err
+}
 
 func getMetaFromCinemeta(ctx context.Context, imdbID, itype string) (*Meta, error) {
 	url := fmt.Sprintf("https://v3-cinemeta.strem.io/meta/%s/%s.json", itype, imdbID)
@@ -151,6 +203,79 @@ func getMeta(ctx context.Context, id, itype string) (*Meta, error) {
 		return getNameAndYearFromTmdbPage(ctx, tmdbNum, isSeries)
 	}
 	return nil, fmt.Errorf("unknown id format")
+}
+
+// --- Page search cache ---
+
+var (
+	pageURLCache   = make(map[string]pageURLCacheEntry)
+	pageURLCacheMu sync.RWMutex
+)
+
+type pageURLCacheEntry struct {
+	url      string
+	expires  time.Time
+}
+
+func findPageURLCached(ctx context.Context, name string, year int, isSeries bool) (string, error) {
+	typeSlug := "-movie-"
+	if isSeries {
+		typeSlug = "-series-"
+	}
+	cacheKey := fmt.Sprintf("%s|%d|%s", strings.ToLower(name), year, typeSlug)
+
+	pageURLCacheMu.RLock()
+	if e, ok := pageURLCache[cacheKey]; ok && time.Now().Before(e.expires) {
+		pageURLCacheMu.RUnlock()
+		if e.url != "" {
+			return e.url, nil
+		}
+		return "", fmt.Errorf("cached not found")
+	}
+	pageURLCacheMu.RUnlock()
+
+	url, err := findPageURL(ctx, name, year, isSeries)
+	entry := pageURLCacheEntry{url: url, expires: time.Now().Add(30 * time.Minute)}
+	if err != nil {
+		entry.url = ""
+	}
+	pageURLCacheMu.Lock()
+	pageURLCache[cacheKey] = entry
+	pageURLCacheMu.Unlock()
+	return url, err
+}
+
+// Page HTML cache (15 min TTL, shared across requests for same show)
+var (
+	pageHTMLCache   = make(map[string]pageHTMLCacheEntry)
+	pageHTMLCacheMu sync.RWMutex
+)
+
+type pageHTMLCacheEntry struct {
+	html    string
+	expires time.Time
+}
+
+func fetchPageHTMLCached(ctx context.Context, url string) string {
+	pageHTMLCacheMu.RLock()
+	if e, ok := pageHTMLCache[url]; ok && time.Now().Before(e.expires) {
+		pageHTMLCacheMu.RUnlock()
+		return e.html
+	}
+	pageHTMLCacheMu.RUnlock()
+
+	html, err := fetchPageHTML(ctx, url)
+	if err != nil || html == "" {
+		return ""
+	}
+
+	pageHTMLCacheMu.Lock()
+	pageHTMLCache[url] = pageHTMLCacheEntry{
+		html:    html,
+		expires: time.Now().Add(15 * time.Minute),
+	}
+	pageHTMLCacheMu.Unlock()
+	return html
 }
 
 // --- Page search ---
@@ -304,6 +429,35 @@ func resolveAndValidateBlue(ctx context.Context, hubURL string) []blueLink {
 	return valid
 }
 
+// blueButtonCache caches resolved blue button results per hub URL
+var (
+	blueButtonCache   = make(map[string]blueCacheEntry)
+	blueButtonCacheMu sync.RWMutex
+)
+
+type blueCacheEntry struct {
+	links   []blueLink
+	expires time.Time
+}
+
+func resolveBlueCached(ctx context.Context, hubURL string) []blueLink {
+	blueButtonCacheMu.RLock()
+	if e, ok := blueButtonCache[hubURL]; ok && time.Now().Before(e.expires) {
+		blueButtonCacheMu.RUnlock()
+		return e.links
+	}
+	blueButtonCacheMu.RUnlock()
+
+	links := resolveAndValidateBlue(ctx, hubURL)
+	blueButtonCacheMu.Lock()
+	blueButtonCache[hubURL] = blueCacheEntry{
+		links:   links,
+		expires: time.Now().Add(5 * time.Minute),
+	}
+	blueButtonCacheMu.Unlock()
+	return links
+}
+
 func extractStreams(ctx context.Context, html string, episodeFilter func(string) bool, displayName, baseURL string) []Stream {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
@@ -393,7 +547,7 @@ func extractStreams(ctx context.Context, html string, episodeFilter func(string)
 		ch := make(chan resolvedBlue, len(entries))
 		for _, e := range entries {
 			go func(ent hubEntry) {
-				links := resolveAndValidateBlue(ctx, ent.hubURL)
+				links := resolveBlueCached(ctx, ent.hubURL)
 				ch <- resolvedBlue{entry: ent, blueLinks: links}
 			}(e)
 		}
@@ -422,6 +576,14 @@ func extractMovieStreams(ctx context.Context, html, displayName, baseURL string)
 		return nil
 	}
 
+	// Phase 1: Collect all hub URLs and their metadata (fast, no HTTP)
+	type hubEntry struct {
+		hubURL     string
+		streamName string
+		fileTitle  string
+		sizeBytes  float64
+	}
+	var entries []hubEntry
 	var results []Stream
 	seen := make(map[string]bool)
 
@@ -459,21 +621,43 @@ func extractMovieStreams(ctx context.Context, html, displayName, baseURL string)
 				},
 			})
 
-			// Blue button — validated, shown directly if active
-			blueLinks := resolveAndValidateBlue(ctx, u)
-			for _, bl := range blueLinks {
+			entries = append(entries, hubEntry{
+				hubURL:     u,
+				streamName: name,
+				fileTitle:  fileTitle,
+				sizeBytes:  sizeBytes,
+			})
+		}
+	})
+
+	// Phase 2: Resolve blue buttons CONCURRENTLY (all hub URLs in parallel)
+	if len(entries) > 0 {
+		type resolvedBlue struct {
+			entry     hubEntry
+			blueLinks []blueLink
+		}
+		ch := make(chan resolvedBlue, len(entries))
+		for _, e := range entries {
+			go func(ent hubEntry) {
+				links := resolveBlueCached(ctx, ent.hubURL)
+				ch <- resolvedBlue{entry: ent, blueLinks: links}
+			}(e)
+		}
+		for i := 0; i < len(entries); i++ {
+			r := <-ch
+			for _, bl := range r.blueLinks {
 				results = append(results, Stream{
 					URL:   bl.url,
-					Name:  name + " [" + bl.label + "]",
-					Title: fileTitle + "\n🔵 " + bl.label + " | Direct",
+					Name:  r.entry.streamName + " [" + bl.label + "]",
+					Title: r.entry.fileTitle + "\n🔵 " + bl.label + " | Direct",
 					BehaviorHints: map[string]any{
 						"notWebReady": true,
-						"videoSize":   sizeBytes,
+						"videoSize":   r.entry.sizeBytes,
 					},
 				})
 			}
 		}
-	})
+	}
 
 	return results
 }
@@ -562,7 +746,8 @@ func extractPackStreams(ctx context.Context, html string, seasonNum int, display
 				return
 			}
 
-			links, err := resolvePackLinks(ctx, it.url)
+			// Use cached pack link resolution
+			links, err := resolvePackLinksCached(ctx, it.url)
 			if err != nil || len(links) == 0 {
 				mu.Lock()
 				allStreams = append(allStreams, Stream{
@@ -600,4 +785,33 @@ func extractPackStreams(ctx context.Context, html string, seasonNum int, display
 
 	wg.Wait()
 	return allStreams, nil
+}
+
+// Pack link resolution cache
+var (
+	packLinkCache   = make(map[string]packCacheEntry)
+	packLinkCacheMu sync.RWMutex
+)
+
+type packCacheEntry struct {
+	links   []packLink
+	expires time.Time
+}
+
+func resolvePackLinksCached(ctx context.Context, hubURL string) ([]packLink, error) {
+	packLinkCacheMu.RLock()
+	if e, ok := packLinkCache[hubURL]; ok && time.Now().Before(e.expires) {
+		packLinkCacheMu.RUnlock()
+		return e.links, nil
+	}
+	packLinkCacheMu.RUnlock()
+
+	links, err := resolvePackLinks(ctx, hubURL)
+	packLinkCacheMu.Lock()
+	packLinkCache[hubURL] = packCacheEntry{
+		links:   links,
+		expires: time.Now().Add(5 * time.Minute),
+	}
+	packLinkCacheMu.Unlock()
+	return links, err
 }
