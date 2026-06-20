@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -87,34 +90,89 @@ func urlEncode(s string) string {
 	return url.QueryEscape(s)
 }
 
-// --- CDN cache ---
+// --- CDN cache (in-memory + disk persistence) ---
+
+const cdnCacheFileName = "cdn_cache.json"
 
 type cdnCacheEntry struct {
-	redURL  string
-	expires time.Time
+	RedURL  string    `json:"red_url"`
+	Expires time.Time `json:"expires"`
 }
 
 var (
-	cdnCache   = make(map[string]*cdnCacheEntry)
-	cdnCacheMu sync.RWMutex
+	cdnCache     = make(map[string]*cdnCacheEntry)
+	cdnCacheMu   sync.RWMutex
+	cdnCachePath string
 )
+
+func cdnCacheFilePath() string {
+	if cdnCachePath != "" {
+		return cdnCachePath
+	}
+	return filepath.Join(configDir(), cdnCacheFileName)
+}
 
 func cdnCacheGet(key string) (string, bool) {
 	cdnCacheMu.RLock()
 	defer cdnCacheMu.RUnlock()
 	e, ok := cdnCache[key]
-	if !ok || time.Now().After(e.expires) {
+	if !ok || time.Now().After(e.Expires) {
 		return "", false
 	}
-	return e.redURL, true
+	return e.RedURL, true
 }
 
 func cdnCacheSet(key, redURL string) {
 	cdnCacheMu.Lock()
-	defer cdnCacheMu.Unlock()
 	cdnCache[key] = &cdnCacheEntry{
-		redURL:  redURL,
-		expires: time.Now().Add(5 * time.Minute),
+		RedURL:  redURL,
+		Expires: time.Now().Add(5 * time.Minute),
+	}
+	cdnCacheMu.Unlock()
+	go cdnCacheSaveToDisk()
+}
+
+func cdnCacheSaveToDisk() {
+	cdnCacheMu.RLock()
+	snapshot := make(map[string]*cdnCacheEntry, len(cdnCache))
+	for k, v := range cdnCache {
+		if time.Now().Before(v.Expires) {
+			snapshot[k] = v
+		}
+	}
+	cdnCacheMu.RUnlock()
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return
+	}
+	dir := configDir()
+	os.MkdirAll(dir, 0755)
+	path := cdnCacheFilePath()
+	os.WriteFile(path, data, 0644)
+}
+
+func cdnCacheLoadFromDisk() {
+	path := cdnCacheFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var entries map[string]*cdnCacheEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return
+	}
+	loaded := 0
+	cdnCacheMu.Lock()
+	for k, v := range entries {
+		if time.Now().Before(v.Expires) {
+			cdnCache[k] = v
+			loaded++
+		}
+	}
+	cdnCacheMu.Unlock()
+	if loaded > 0 {
+		log.Printf("[cdn-cache] loaded %d entries from disk", loaded)
 	}
 }
 

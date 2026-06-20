@@ -255,7 +255,13 @@ func parseRangeSmart(rangeHeader string) (start, end int64, openEnded bool, err 
 
 // --- Pre-warming ---
 
+// prewarmSem limits concurrent pre-warm goroutines to avoid
+// overwhelming upstream hub/gamerxyt servers.
+var prewarmSem = make(chan struct{}, 5)
+
 func prewarmExtract(ctx context.Context, hubURL string) {
+	prewarmSem <- struct{}{}        // acquire slot
+	defer func() { <-prewarmSem }() // release slot
 	cacheKey := "/extract/?url=" + hubURL
 	if cached, ok := cache.Get(cacheKey); ok {
 		var existing string

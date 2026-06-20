@@ -63,6 +63,7 @@ func main() {
 		log.Fatalf("Failed to load site registry: %v", err)
 	}
 	cache.loadFromDisk()
+	cdnCacheLoadFromDisk()
 	stopPruner := startCachePruner()
 	defer stopPruner()
 	go checkForUpdates()
@@ -347,19 +348,23 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, resp)
 
-	// Pre-warm the first extract URL's CDN redirect so subsequent
-	// /extract/ calls resolve near-instantly.
+	// Pre-warm ALL extract URLs in parallel so subsequent /extract/
+	// calls resolve near-instantly. Deduplicates by hub URL.
+	var hubURLs []string
+	seenHub := make(map[string]bool)
 	for _, s := range streams {
-		if strings.Contains(s.URL, "/extract/") {
-			// Parse hub URL from the extract query param
+		if strings.Contains(s.URL, "/extract/?url=") {
 			if u, err := url.Parse(s.URL); err == nil {
-				hubURL := u.Query().Get("url")
-				if hubURL != "" {
-					go prewarmExtract(context.Background(), hubURL)
+				raw := u.Query().Get("url")
+				if raw != "" && !seenHub[raw] {
+					seenHub[raw] = true
+					hubURLs = append(hubURLs, raw)
 				}
 			}
-			break // only pre-warm the first one
 		}
+	}
+	for _, hubURL := range hubURLs {
+		go prewarmExtract(context.Background(), hubURL)
 	}
 }
 
